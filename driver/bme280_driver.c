@@ -1,12 +1,12 @@
 // BME280 Linux I2C Driver
 // Environmental Monitoring Final Project
-// This driver registers with the Linux I2C subsystem
-// and verifies the BME280 sensor's chip ID.
+// This driver registers with the Linux I2C subsystem and verifies the BME280 sensor's chip ID.
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/errno.h>
+#include <linux/delay.h>
 
 #define DRIVER_NAME "bme280_custom"
 #define BME280_CHIP_ID_REG 0xD0
@@ -19,6 +19,8 @@
 
 // first register containing measurement data
 #define BME280_DATA_REG       0xF7
+
+#define BME280_DATA_LENGTH 8
 
 // configure the BME280 sensor
 static int bme280_init_sensor(struct i2c_client *client)
@@ -61,12 +63,62 @@ static int bme280_init_sensor(struct i2c_client *client)
     return 0;
 }
 
+// read raw pressure, temp, and humidity measurements
+// sensor stores data in registers 0xF7 - 0xFE
+static int bme280_read_raw(struct i2c_client *client,
+                           u32 *pressure,
+                           u32 *temperature,
+                           u16 *humidity)
+{
+    u8 data[BME280_DATA_LENGTH];
+    int ret;
+
+    // read all eight measurement registers
+    ret = i2c_smbus_read_i2c_block_data(
+        client,
+        BME280_DATA_REG,
+        BME280_DATA_LENGTH,
+        data
+    );
+
+    if (ret < 0) {
+        dev_err(&client->dev,
+                "Failed to read sensor measurements: %d\n",
+                ret);
+        return ret;
+    }
+
+    if (ret != BME280_DATA_LENGTH)
+        return -EIO;
+
+    // pressure is stored as a 20-bit value
+    *pressure = ((u32)data[0] << 12) |
+                ((u32)data[1] << 4) |
+                (data[2] >> 4);
+
+    // temperature is stored as a 20-bit value
+    *temperature = ((u32)data[3] << 12) |
+                   ((u32)data[4] << 4) |
+                   (data[5] >> 4);
+
+    // humidity is stored as a 16-bit value
+    *humidity = ((u16)data[6] << 8) |
+                data[7];
+
+    return 0;
+}
+
+
 
 // called when Linux matches the driver to a BME280 device
 static int bme280_probe(struct i2c_client *client,
                        const struct i2c_device_id *id)
 {
     int chip_id;
+    u32 raw_pressure;
+    u32 raw_temperature;
+    u16 raw_humidity;
+    int ret;
 
     dev_info(&client->dev, "Probing BME280 sensor\n");
 
@@ -91,11 +143,31 @@ static int bme280_probe(struct i2c_client *client,
          "BME280 detected, chip ID: 0x%02x\n",
          chip_id);
 
-    // Initialize the sensor after confirming its chip ID.
     chip_id = bme280_init_sensor(client);
 
     if (chip_id < 0)
     	return chip_id;
+
+/*
+ * Read one sample after sensor initialization.
+ * Normal-mode measurements require time to complete.
+ */
+    // read one sample after sensor initialization
+    msleep(50);
+    
+    ret = bme280_read_raw(client,
+                      &raw_pressure,
+                      &raw_temperature,
+                      &raw_humidity);
+    
+    if (ret < 0)
+	return ret;
+
+    dev_info(&client->dev,
+    	     "Raw measurements: T=%u P=%u H=%u\n",
+             raw_temperature,
+             raw_pressure,
+             raw_humidity);
 
     return 0;
 }
